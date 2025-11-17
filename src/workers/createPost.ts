@@ -9,66 +9,91 @@ type JobPayload = {
 export async function createPostJob(payload: JobPayload) {
   log('[CREATE_POST] Starting job with payload', payload);
 
-  // 1) Elegir producto muy simple (luego lo cambiamos a Epsilon-Greedy)
-  const { data: product, error: productError } = await supabaseAdmin
+  // 1) Elegir producto desde tabla `products`
+  const { data: products, error: productError } = await supabaseAdmin
     .from('products')
     .select('*')
     .eq('is_active', true)
     .gt('stock', 0)
-    .limit(1)
-    .single();
+    .limit(50); // cogemos varios para poder randomizar
 
-  if (productError || !product) {
-    logError('[CREATE_POST] No product found', productError);
-    throw productError || new Error('No product found');
+  if (productError) {
+    logError('[CREATE_POST] Error fetching products', productError);
+    throw productError;
   }
+
+  if (!products || products.length === 0) {
+    logError('[CREATE_POST] No active products with stock > 0 found');
+    throw new Error('No active products with stock > 0 found');
+  }
+
+  // Elegir uno al azar (luego lo cambiamos a Epsilon-Greedy)
+  const randomIndex = Math.floor(Math.random() * products.length);
+  const product = products[randomIndex];
+
+  log('[CREATE_POST] Selected product', {
+    productId: product.id,
+    productName: product.product_name,
+    price: product.verkaufspreis,
+  });
 
   const style = 'fun';
   const format = 'IG_CAROUSEL';
   const angle = 'xmas_gift';
 
+  const shortDescription =
+    (product.description as string | null)?.slice(0, 300) || 'Keine Beschreibung';
+
   // 2) Llamar a OpenAI con la API correcta
   const prompt = `
 Eres un copywriter para una tienda online de perros llamada Dogonauts.
-Crea un post en alemán para Instagram/Facebook en formato ${format}, estilo ${style}, con ángulo ${angle}.
+Crea un post en **alemán** para Instagram/Facebook en formato ${format},
+estilo ${style}, con ángulo ${angle} (regalo / Black Friday / Weihnachten).
+
 Producto: ${product.product_name}
-Precio: ${product.verkaufspreis} €
+Preis: ${product.verkaufspreis} €
+Beschreibung: ${shortDescription}
 
-Devuelve SOLO JSON válido con esta estructura:
+Devuelve SOLO JSON válido con esta estructura EXACTA:
 {
-  "hook": "texto del gancho atractivo",
-  "body": "cuerpo del post",
-  "cta": "llamada a la acción",
-  "hashtag_block": "hashtags relevantes",
-  "image_prompt": "descripción para generar imagen"
+  "hook": "texto del gancho atractivo en alemán",
+  "body": "cuerpo del post en alemán",
+  "cta": "llamada a la acción en alemán",
+  "hashtag_block": "bloque de hashtags en alemán, con # y separados por espacios",
+  "image_prompt": "descripción en inglés para generar imagen del producto y el perro"
 }
-  `.trim();
+`.trim();
 
-  // Usar la API de Chat Completions correcta
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4-turbo-preview', // o 'gpt-4o-mini' para más económico
+    model: 'gpt-4o-mini', // o el modelo que estés usando
     messages: [
       {
         role: 'system',
-        content: 'Eres un copywriter experto en marketing para redes sociales. Respondes siempre en formato JSON válido.'
+        content:
+          'Eres un copywriter experto en marketing para redes sociales de marcas de mascotas. Respondes SIEMPRE en formato JSON válido, sin texto adicional.',
       },
       {
         role: 'user',
-        content: prompt
-      }
+        content: prompt,
+      },
     ],
-    response_format: { type: 'json_object' }, // Nota: 'json_object' no 'json'
+    response_format: { type: 'json_object' }, // importante: json_object
     temperature: 0.7,
   });
 
-  // Acceder correctamente al contenido
-  const content = completion.choices[0].message.content;
-  
+  const content = completion.choices[0]?.message?.content;
+
   if (!content) {
     throw new Error('No content received from OpenAI');
   }
 
-  const json = JSON.parse(content);
+  let json: any;
+  try {
+    json = JSON.parse(content);
+  } catch (err) {
+    logError('[CREATE_POST] Failed to parse JSON from OpenAI', { err, content });
+    throw err;
+  }
 
   // Validación básica del JSON recibido
   if (!json.hook || !json.body || !json.cta || !json.hashtag_block) {
@@ -77,25 +102,30 @@ Devuelve SOLO JSON válido con esta estructura:
   }
 
   // 3) Insertar en generated_posts
-  const { error: insertError } = await supabaseAdmin.from('generated_posts').insert({
-    product_id: product.id,
-    style,
-    format,
-    angle,
-    hook: json.hook,
-    body: json.body,
-    cta: json.cta,
-    hashtag_block: json.hashtag_block,
-    status: 'DRAFT',
-    channel_target: payload.target_channel || 'BOTH',
-  });
+  const { error: insertError } = await supabaseAdmin
+    .from('generated_posts')
+    .insert({
+      product_id: product.id,
+      style,
+      format,
+      angle,
+      hook: json.hook,
+      body: json.body,
+      cta: json.cta,
+      hashtag_block: json.hashtag_block,
+      status: 'DRAFT',
+      channel_target: payload.target_channel || 'BOTH',
+    });
 
   if (insertError) {
     logError('[CREATE_POST] Error inserting generated_post', insertError);
     throw insertError;
   }
 
-  log('[CREATE_POST] Draft created successfully');
-  
+  log('[CREATE_POST] Draft created successfully', {
+    productId: product.id,
+    productName: product.product_name,
+  });
+
   return { product, post: json };
 }
