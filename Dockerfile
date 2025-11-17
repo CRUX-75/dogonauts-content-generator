@@ -1,15 +1,25 @@
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
+# Copiar archivos de configuración
 COPY package*.json ./
-RUN npm ci --only=production
-
 COPY tsconfig.json ./
+
+# Instalar TODAS las dependencias (incluyendo TypeScript)
+RUN npm ci
+
+# Copiar código fuente
 COPY src ./src
 
+# Compilar TypeScript
 RUN npm run build
 
+# Limpiar devDependencies después de compilar
+RUN npm prune --omit=dev
+
+# Exponer puerto
 EXPOSE 3000
 
-CMD ["npm", "start"]
+# Iniciar aplicación compilada
+CMD ["node", "dist/index.js"]
