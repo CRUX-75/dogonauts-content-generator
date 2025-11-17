@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "dev": "nodemon --exec ts-node src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "worker": "ts-node src/workers/runWorker.ts",
+    "worker:dev": "nodemon --exec ts-node src/workers/runWorker.ts",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "check": "ts-node src/checkConfig.ts"
+  }
+}
