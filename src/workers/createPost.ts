@@ -1,6 +1,7 @@
 import { supabaseAdmin } from '../lib/supabase';
 import { openai } from '../lib/openai';
 import { log, logError } from '../lib/logger';
+import { DOGONAUTS_CONTENT_SYSTEM_PROMPT } from '../agent/systemPrompt';
 
 type JobPayload = {
   target_channel?: 'IG_FB' | 'IG_ONLY' | 'FB_ONLY';
@@ -27,7 +28,7 @@ export async function createPostJob(payload: JobPayload) {
     throw new Error('No active products with stock > 0 found');
   }
 
-  // Elegir uno al azar (luego lo cambiamos a Epsilon-Greedy)
+  // Elegir uno al azar (más adelante Epsilon-Greedy)
   const randomIndex = Math.floor(Math.random() * products.length);
   const product = products[randomIndex];
 
@@ -37,47 +38,72 @@ export async function createPostJob(payload: JobPayload) {
     price: product.verkaufspreis,
   });
 
-  const style = 'fun';
-  const format = 'IG_CAROUSEL';
-  const angle = 'xmas_gift';
+  // Estos tres parámetros los usaremos luego para Epsilon-Greedy / A/B
+  const style = 'fun' as const;
+  const format = 'IG_CAROUSEL' as const;
+  const angle = 'xmas_gift' as const;
 
   const shortDescription =
-    (product.description as string | null)?.slice(0, 300) || 'Keine Beschreibung';
+    (product.description as string | null)?.slice(0, 400) || 'Keine Beschreibung verfügbar';
 
-  // 2) Llamar a OpenAI con la API correcta
-  const prompt = `
-Eres un copywriter para una tienda online de perros llamada Dogonauts.
-Crea un post en **alemán** para Instagram/Facebook en formato ${format},
-estilo ${style}, con ángulo ${angle} (regalo / Black Friday / Weihnachten).
+  const category =
+    (product.kategorie as string | null) ||
+    (product.category as string | null) ||
+    'Allgemein';
 
-Producto: ${product.product_name}
-Preis: ${product.verkaufspreis} €
-Beschreibung: ${shortDescription}
+  const price =
+    typeof product.verkaufspreis === 'number'
+      ? product.verkaufspreis
+      : parseFloat(String(product.verkaufspreis ?? '0')) || 0;
 
-Devuelve SOLO JSON válido con esta estructura EXACTA:
-{
-  "hook": "texto del gancho atractivo en alemán",
-  "body": "cuerpo del post en alemán",
-  "cta": "llamada a la acción en alemán",
-  "hashtag_block": "bloque de hashtags en alemán, con # y separados por espacios",
-  "image_prompt": "descripción en inglés para generar imagen del producto y el perro"
-}
-`.trim();
+  const imageUrl =
+    (product.image_url as string | null) ||
+    (product.image as string | null) ||
+    null;
+
+  // 2) Llamar a OpenAI con System Prompt de Dogonauts
+  const userContent = `
+Du erhältst jetzt die Produktdaten und den Kampagnenkontext für einen Social-Media-Post.
+
+Produktdaten:
+- Name: ${product.product_name}
+- Kategorie: ${category}
+- Kurzbeschreibung: ${shortDescription}
+- Preis: ${price.toFixed(2)} €
+- Bild-URL (falls vorhanden): ${imageUrl ?? 'keine Bild-URL angegeben'}
+
+Kampagnenkontext:
+- format: ${format}
+- style: ${style}
+- angle: ${angle}
+- Zielplattformen: Instagram & Facebook
+- Ziel: Scroll stoppen, Weihnachts-/Geschenkstimmung erzeugen, klar zur Handlung (Kauf im Dogonauts-Shop) führen.
+
+WICHTIG:
+- Schreibe IMMER in lockerer **Du-Form** auf Deutsch.
+- Kein "Sie", keine formelle Anrede.
+- Kein Markdown, keine Erklärungen.
+- Verwende KEINE anderen Preise oder Rabatte als oben angegeben.
+- Wenn nichts zu Rabatt/Aktion angegeben ist, erfinde keine Rabatte.
+
+Erzeuge auf Basis dieser Daten einen einzigen Social-Media-Post (für IG/FB)
+im Branding von Dogonauts und halte dich GENAU an das JSON-Format,
+das im System Prompt beschrieben ist.
+  `.trim();
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini', // o el modelo que estés usando
+    model: 'gpt-4o-mini',
     messages: [
       {
         role: 'system',
-        content:
-          'Eres un copywriter experto en marketing para redes sociales de marcas de mascotas. Respondes SIEMPRE en formato JSON válido, sin texto adicional.',
+        content: DOGONAUTS_CONTENT_SYSTEM_PROMPT,
       },
       {
         role: 'user',
-        content: prompt,
+        content: userContent,
       },
     ],
-    response_format: { type: 'json_object' }, // importante: json_object
+    response_format: { type: 'json_object' },
     temperature: 0.7,
   });
 
@@ -96,26 +122,26 @@ Devuelve SOLO JSON válido con esta estructura EXACTA:
   }
 
   // Validación básica del JSON recibido
-  if (!json.hook || !json.body || !json.cta || !json.hashtag_block) {
+  if (!json.hook || !json.body || !json.cta || !json.hashtag_block || !json.image_prompt) {
     logError('[CREATE_POST] Invalid JSON structure from OpenAI', json);
     throw new Error('Invalid JSON structure received from OpenAI');
   }
 
-  // 3) Insertar en generated_posts
-  const { error: insertError } = await supabaseAdmin
-    .from('generated_posts')
-    .insert({
-      product_id: product.id,
-      style,
-      format,
-      angle,
-      hook: json.hook,
-      body: json.body,
-      cta: json.cta,
-      hashtag_block: json.hashtag_block,
-      status: 'DRAFT',
-      channel_target: payload.target_channel || 'BOTH',
-    });
+  // 3) Insertar en generated_posts (incluyendo image_prompt)
+  const { error: insertError } = await supabaseAdmin.from('generated_posts').insert({
+    product_id: product.id,
+    style,
+    format,
+    angle,
+    hook: json.hook,
+    body: json.body,
+    cta: json.cta,
+    hashtag_block: json.hashtag_block,
+    // nuevo: guardamos el image_prompt para usarlo luego en Image Styler
+    image_prompt: json.image_prompt,
+    status: 'DRAFT',
+    channel_target: payload.target_channel || 'IG_FB',
+  });
 
   if (insertError) {
     logError('[CREATE_POST] Error inserting generated_post', insertError);
