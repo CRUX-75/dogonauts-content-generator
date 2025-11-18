@@ -1,3 +1,5 @@
+// src/lib/metaClient.ts
+
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../config';
 import { log, logError } from './logger';
@@ -29,27 +31,105 @@ class MetaGraphClient {
     this.instagramAccountId = config.meta.instagramBusinessAccountId;
     this.facebookPageId = config.meta.facebookPageId;
 
+    if (!this.accessToken) {
+      throw new Error('[META] META_ACCESS_TOKEN is not configured');
+    }
+    if (!this.instagramAccountId) {
+      throw new Error('[META] INSTAGRAM_BUSINESS_ACCOUNT_ID is not configured');
+    }
+    if (!this.facebookPageId) {
+      log('[META] Warning: FACEBOOK_PAGE_ID is not configured, FB posts will fail');
+    }
+
     this.client = axios.create({
       baseURL: 'https://graph.facebook.com/v18.0',
       params: {
         access_token: this.accessToken,
       },
     });
+
+    log('[META] MetaGraphClient initialized');
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Helpers
+  // ────────────────────────────────────────────────────────────────
+
+  private sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
-   * Publicar un carousel en Instagram
+   * Espera a que un media container esté listo (status_code = FINISHED).
+   * Lanza error si entra en ERROR o si no está listo tras N reintentos.
+   */
+  private async waitForMediaReady(creationId: string): Promise<void> {
+    const maxAttempts = 10;
+    const delayMs = 2000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const { data } = await this.client.get(`/${creationId}`, {
+        params: {
+          fields: 'status_code',
+        },
+      });
+
+      const statusCode = data?.status_code as string | undefined;
+
+      log('[META] Media status check', {
+        creationId,
+        attempt,
+        statusCode,
+      });
+
+      if (statusCode === 'FINISHED') {
+        return;
+      }
+
+      if (statusCode === 'ERROR') {
+        throw new Error(
+          `[META] Media container ${creationId} entered ERROR status`
+        );
+      }
+
+      if (attempt === maxAttempts) {
+        throw new Error(
+          `[META] Media container ${creationId} not ready after ${maxAttempts} attempts`
+        );
+      }
+
+      await this.sleep(delayMs);
+    }
+  }
+
+  private getErrorPayload(error: any) {
+    if (error?.response?.data) return error.response.data;
+    return error;
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Instagram – Carousel
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Publicar un carousel en Instagram:
+   * 1) Crear containers de cada imagen (is_carousel_item)
+   * 2) Crear container principal CAROUSEL
+   * 3) Esperar a que el container CAROUSEL esté FINISHED
+   * 4) /media_publish
    */
   async publishInstagramCarousel(
     images: InstagramCarouselImage[],
     caption: string
   ): Promise<string> {
     try {
-      log('[META] Publishing Instagram carousel', { imageCount: images.length });
+      log('[META] Publishing Instagram carousel', {
+        imageCount: images.length,
+      });
 
       // Paso 1: Crear containers para cada imagen
       const containerIds: string[] = [];
-      
+
       for (const image of images) {
         const { data } = await this.client.post(
           `/${this.instagramAccountId}/media`,
@@ -58,8 +138,17 @@ class MetaGraphClient {
             is_carousel_item: true,
           }
         );
+
+        if (!data?.id) {
+          throw new Error(
+            '[META] Failed to create carousel item container (no id)'
+          );
+        }
+
         containerIds.push(data.id);
-        log('[META] Created carousel item container', { containerId: data.id });
+        log('[META] Created carousel item container', {
+          containerId: data.id,
+        });
       }
 
       // Paso 2: Crear el carousel container principal
@@ -72,31 +161,65 @@ class MetaGraphClient {
         }
       );
 
-      log('[META] Created carousel container', { containerId: carouselData.id });
+      if (!carouselData?.id) {
+        throw new Error(
+          '[META] Failed to create carousel container (no id)'
+        );
+      }
 
-      // Paso 3: Publicar el carousel
+      const carouselCreationId = carouselData.id;
+      log('[META] Created carousel container', {
+        containerId: carouselCreationId,
+      });
+
+      // Paso 3: Esperar a que el carousel esté listo
+      await this.waitForMediaReady(carouselCreationId);
+
+      // Paso 4: Publicar el carousel
       const { data: publishData } = await this.client.post(
         `/${this.instagramAccountId}/media_publish`,
         {
-          creation_id: carouselData.id,
+          creation_id: carouselCreationId,
         }
       );
 
-      log('[META] ✅ Instagram carousel published', { mediaId: publishData.id });
-      return publishData.id;
+      if (!publishData?.id) {
+        throw new Error(
+          '[META] Failed to publish Instagram carousel (no media id)'
+        );
+      }
 
+      log('[META] ✅ Instagram carousel published', {
+        mediaId: publishData.id,
+      });
+
+      return publishData.id;
     } catch (error) {
-      logError('[META] Failed to publish Instagram carousel', error);
+      logError(
+        '[META] Failed to publish Instagram carousel',
+        this.getErrorPayload(error)
+      );
       throw error;
     }
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // Instagram – Single image
+  // ────────────────────────────────────────────────────────────────
+
   /**
-   * Publicar una imagen simple en Instagram
+   * Publicar una imagen simple en Instagram:
+   * 1) Crear media container
+   * 2) Esperar a que status_code = FINISHED
+   * 3) /media_publish
    */
-  async publishInstagramSingle(params: InstagramSingleImageParams): Promise<string> {
+  async publishInstagramSingle(
+    params: InstagramSingleImageParams
+  ): Promise<string> {
     try {
-      log('[META] Publishing Instagram single image');
+      log('[META] Publishing Instagram single image', {
+        image_url: params.image_url,
+      });
 
       // Paso 1: Crear media container
       const { data: containerData } = await this.client.post(
@@ -107,24 +230,49 @@ class MetaGraphClient {
         }
       );
 
-      log('[META] Created media container', { containerId: containerData.id });
+      if (!containerData?.id) {
+        throw new Error(
+          '[META] Failed to create IG media container (no id)'
+        );
+      }
 
-      // Paso 2: Publicar
+      const creationId = containerData.id;
+      log('[META] Created IG media container', { containerId: creationId });
+
+      // Paso 2: Esperar a que el media esté listo
+      await this.waitForMediaReady(creationId);
+
+      // Paso 3: Publicar
       const { data: publishData } = await this.client.post(
         `/${this.instagramAccountId}/media_publish`,
         {
-          creation_id: containerData.id,
+          creation_id: creationId,
         }
       );
 
-      log('[META] ✅ Instagram single image published', { mediaId: publishData.id });
-      return publishData.id;
+      if (!publishData?.id) {
+        throw new Error(
+          '[META] Failed to publish Instagram single image (no media id)'
+        );
+      }
 
+      log('[META] ✅ Instagram single image published', {
+        mediaId: publishData.id,
+      });
+
+      return publishData.id;
     } catch (error) {
-      logError('[META] Failed to publish Instagram single image', error);
+      logError(
+        '[META] Failed to publish Instagram single image',
+        this.getErrorPayload(error)
+      );
       throw error;
     }
   }
+
+  // ────────────────────────────────────────────────────────────────
+  // Facebook – Posts
+  // ────────────────────────────────────────────────────────────────
 
   /**
    * Publicar en Facebook (page post)
@@ -142,28 +290,40 @@ class MetaGraphClient {
         }
       );
 
+      if (!data?.id) {
+        throw new Error('[META] Failed to publish Facebook post (no id)');
+      }
+
       log('[META] ✅ Facebook post published', { postId: data.id });
       return data.id;
-
     } catch (error) {
-      logError('[META] Failed to publish Facebook post', error);
+      logError(
+        '[META] Failed to publish Facebook post',
+        this.getErrorPayload(error)
+      );
       throw error;
     }
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // Facebook – Carousel (placeholder, igual que antes)
+  // ────────────────────────────────────────────────────────────────
+
   /**
-   * Publicar carousel en Facebook (múltiples imágenes)
+   * Publicar carousel en Facebook (múltiples imágenes).
+   * Nota: en producción deberías subir las imágenes primero y usar sus IDs.
    */
   async publishFacebookCarousel(
     images: string[],
     message: string
   ): Promise<string> {
     try {
-      log('[META] Publishing Facebook carousel', { imageCount: images.length });
+      log('[META] Publishing Facebook carousel', {
+        imageCount: images.length,
+      });
 
-      // Crear attached_media array
-      const attachedMedia = images.map(url => ({
-        media_fbid: url, // En producción, primero subes las imágenes y obtienes sus IDs
+      const attachedMedia = images.map((url) => ({
+        media_fbid: url, // TODO: en producción, reemplazar con IDs reales de media
       }));
 
       const { data } = await this.client.post(
@@ -174,33 +334,43 @@ class MetaGraphClient {
         }
       );
 
+      if (!data?.id) {
+        throw new Error('[META] Failed to publish Facebook carousel (no id)');
+      }
+
       log('[META] ✅ Facebook carousel published', { postId: data.id });
       return data.id;
-
     } catch (error) {
-      logError('[META] Failed to publish Facebook carousel', error);
+      logError(
+        '[META] Failed to publish Facebook carousel',
+        this.getErrorPayload(error)
+      );
       throw error;
     }
   }
+
+  // ────────────────────────────────────────────────────────────────
+  // Insights
+  // ────────────────────────────────────────────────────────────────
 
   /**
    * Obtener métricas de un post de Instagram
    */
   async getInstagramMediaInsights(mediaId: string): Promise<any> {
     try {
-      const { data } = await this.client.get(
-        `/${mediaId}/insights`,
-        {
-          params: {
-            metric: 'engagement,impressions,reach,saved,likes,comments,shares',
-          },
-        }
-      );
+      const { data } = await this.client.get(`/${mediaId}/insights`, {
+        params: {
+          metric:
+            'engagement,impressions,reach,saved,likes,comments,shares',
+        },
+      });
 
       return this.parseInsights(data.data);
-
     } catch (error) {
-      logError('[META] Failed to get Instagram insights', { mediaId, error });
+      logError('[META] Failed to get Instagram insights', {
+        mediaId,
+        error: this.getErrorPayload(error),
+      });
       throw error;
     }
   }
@@ -210,14 +380,12 @@ class MetaGraphClient {
    */
   async getFacebookPostInsights(postId: string): Promise<any> {
     try {
-      const { data } = await this.client.get(
-        `/${postId}`,
-        {
-          params: {
-            fields: 'likes.summary(true),comments.summary(true),shares,reactions.summary(true)',
-          },
-        }
-      );
+      const { data } = await this.client.get(`/${postId}`, {
+        params: {
+          fields:
+            'likes.summary(true),comments.summary(true),shares,reactions.summary(true)',
+        },
+      });
 
       return {
         likes: data.likes?.summary?.total_count || 0,
@@ -225,9 +393,11 @@ class MetaGraphClient {
         shares: data.shares?.count || 0,
         reactions: data.reactions?.summary?.total_count || 0,
       };
-
     } catch (error) {
-      logError('[META] Failed to get Facebook insights', { postId, error });
+      logError('[META] Failed to get Facebook insights', {
+        postId,
+        error: this.getErrorPayload(error),
+      });
       throw error;
     }
   }
@@ -237,7 +407,7 @@ class MetaGraphClient {
    */
   private parseInsights(insightsData: any[]): Record<string, number> {
     const metrics: Record<string, number> = {};
-    
+
     for (const insight of insightsData) {
       metrics[insight.name] = insight.values[0]?.value || 0;
     }
