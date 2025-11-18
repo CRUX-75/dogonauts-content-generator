@@ -1,7 +1,7 @@
 import { supabaseAdmin } from '../lib/supabase';
 import { metaClient } from '../lib/metaClient';
 import { log, logError } from '../lib/logger';
-import { GeneratedPost, PostFormat } from '../types/database';
+import { GeneratedPost } from '../types/database';
 
 type PublishJobPayload = {
   post_id?: string;
@@ -44,7 +44,7 @@ export async function publishPostJob(payload: PublishJobPayload) {
       post = data;
     }
 
-    // ✅ CORRECCIÓN: Verificar que post no sea null
+    // ✅ Verificar que post no sea null
     if (!post) {
       throw new Error('Post not found');
     }
@@ -61,13 +61,38 @@ export async function publishPostJob(payload: PublishJobPayload) {
       channel_target: post.channel_target,
     });
 
-    // Construir el caption completo
+    // 1) Cargar producto para obtener la imagen real
+    const { data: product, error: productError } = await supabaseAdmin
+      .from('products')
+      .select('id, product_name, image_url, image')
+      .eq('id', post.product_id)
+      .single();
+
+    if (productError || !product) {
+      logError('[PUBLISH_POST] Failed to load product for post', productError);
+      throw productError || new Error('Product not found for generated_post');
+    }
+
+    const imageUrl =
+      (product.image_url as string | null) ||
+      (product.image as string | null) ||
+      // fallback solo si el producto no tiene imagen
+      'https://via.placeholder.com/1080x1080?text=Dogonauts';
+
+    log('[PUBLISH_POST] Using image URL for publish', {
+      postId: post.id,
+      productId: product.id,
+      productName: product.product_name,
+      imageUrl,
+    });
+
+    // 2) Construir el caption completo
     const fullCaption = buildCaption(post);
 
-    // Publicar según formato y canal
-    const results = await publishToChannels(post, fullCaption);
+    // 3) Publicar según formato y canal, usando la imagen del producto
+    const results = await publishToChannels(post, fullCaption, imageUrl);
 
-    // Actualizar el post con los IDs de publicación
+    // 4) Actualizar el post con los IDs de publicación
     const updateData: any = {
       status: 'PUBLISHED',
       published_at: new Date().toISOString(),
@@ -85,7 +110,7 @@ export async function publishPostJob(payload: PublishJobPayload) {
       throw updateError;
     }
 
-    // Crear entrada en post_feedback para tracking
+    // 5) Crear entrada en post_feedback para tracking (puede fallar sin bloquear)
     const { error: feedbackError } = await supabaseAdmin
       .from('post_feedback')
       .insert({
@@ -132,7 +157,8 @@ function buildCaption(post: GeneratedPost): string {
 
 async function publishToChannels(
   post: GeneratedPost,
-  caption: string
+  caption: string,
+  imageUrl: string
 ): Promise<{ igMediaId?: string; fbPostId?: string }> {
   const results: { igMediaId?: string; fbPostId?: string } = {};
 
@@ -142,9 +168,9 @@ async function publishToChannels(
   if (publishToIG) {
     try {
       if (post.format === 'IG_CAROUSEL') {
-        results.igMediaId = await publishInstagramCarousel(post, caption);
+        results.igMediaId = await publishInstagramCarousel(post, caption, imageUrl);
       } else if (post.format === 'IG_SINGLE') {
-        results.igMediaId = await publishInstagramSingle(post, caption);
+        results.igMediaId = await publishInstagramSingle(post, caption, imageUrl);
       } else if (post.format === 'IG_REEL') {
         log('[PUBLISH_POST] IG_REEL not implemented yet');
       }
@@ -156,7 +182,7 @@ async function publishToChannels(
   if (publishToFB) {
     try {
       if (post.format === 'FB_CAROUSEL') {
-        results.fbPostId = await publishFacebookCarousel(post, caption);
+        results.fbPostId = await publishFacebookCarousel(post, caption, imageUrl);
       } else if (post.format === 'FB_SINGLE' || post.format === 'IG_SINGLE') {
         results.fbPostId = await publishFacebookSingle(post, caption);
       }
@@ -170,12 +196,16 @@ async function publishToChannels(
 
 async function publishInstagramCarousel(
   post: GeneratedPost,
-  caption: string
+  caption: string,
+  imageUrl: string
 ): Promise<string> {
+  const finalUrl = imageUrl || 'https://via.placeholder.com/1080x1080?text=Dogonauts';
+
+  // Por ahora usamos la misma imagen 3 veces; más tarde Sharp hará variaciones
   const images = [
-    { image_url: 'https://via.placeholder.com/1080x1080?text=Image+1' },
-    { image_url: 'https://via.placeholder.com/1080x1080?text=Image+2' },
-    { image_url: 'https://via.placeholder.com/1080x1080?text=Image+3' },
+    { image_url: finalUrl },
+    { image_url: finalUrl },
+    { image_url: finalUrl },
   ];
 
   return await metaClient.publishInstagramCarousel(images, caption);
@@ -183,24 +213,28 @@ async function publishInstagramCarousel(
 
 async function publishInstagramSingle(
   post: GeneratedPost,
-  caption: string
+  caption: string,
+  imageUrl: string
 ): Promise<string> {
-  const imageUrl = 'https://via.placeholder.com/1080x1080?text=Dogonauts';
+  const finalUrl = imageUrl || 'https://via.placeholder.com/1080x1080?text=Dogonauts';
 
   return await metaClient.publishInstagramSingle({
-    image_url: imageUrl,
+    image_url: finalUrl,
     caption: caption,
   });
 }
 
 async function publishFacebookCarousel(
   post: GeneratedPost,
-  message: string
+  message: string,
+  imageUrl: string
 ): Promise<string> {
+  const finalUrl = imageUrl || 'https://via.placeholder.com/1080x1080?text=Dogonauts';
+
   const images = [
-    'https://via.placeholder.com/1080x1080?text=Image+1',
-    'https://via.placeholder.com/1080x1080?text=Image+2',
-    'https://via.placeholder.com/1080x1080?text=Image+3',
+    finalUrl,
+    finalUrl,
+    finalUrl,
   ];
 
   return await metaClient.publishFacebookCarousel(images, message);
