@@ -305,6 +305,43 @@ class MetaGraphClient {
     }
   }
 
+    /**
+   * Publicar una imagen en Facebook (single image con caption)
+   */
+  async publishFacebookImage({
+    image_url,
+    caption,
+  }: {
+    image_url: string;
+    caption: string;
+  }): Promise<string> {
+    try {
+      log('[META] Publishing Facebook image', { image_url });
+
+      const { data } = await this.client.post(
+        `/${this.facebookPageId}/photos`,
+        {
+          url: image_url,
+          caption,
+          published: true,
+        }
+      );
+
+      if (!data?.post_id) {
+        throw new Error('[META] Failed to publish Facebook image (no post_id)');
+      }
+
+      log('[META] ✅ Facebook image published', { postId: data.post_id });
+      return data.post_id;
+    } catch (error) {
+      logError(
+        '[META] Failed to publish Facebook image',
+        this.getErrorPayload(error)
+      );
+      throw error;
+    }
+  }
+
   // ────────────────────────────────────────────────────────────────
   // Facebook – Carousel (placeholder, igual que antes)
   // ────────────────────────────────────────────────────────────────
