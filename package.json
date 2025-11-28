@@ -15,8 +15,10 @@
     "clean": "rm -rf dist",
     "check": "npx ts-node src/checkConfig.ts",
     "classify-products": "ts-node scripts/classify-products.ts",
-     "run-create-post-job": "ts-node scripts/run-create-post-job.ts",
-     "migrate-images": "ts-node scripts/migrate-product-images.ts"
+    "run-create-post-job": "ts-node scripts/run-create-post-job.ts",
+    "run-publish-post-job": "ts-node scripts/run-publish-post-job.ts",
+    "run-feedback-collect-job": "ts-node scripts/run-feedback-collect-job.ts",
+    "migrate-images": "ts-node scripts/migrate-product-images.ts"
   },
   "keywords": [
     "dogonauts",

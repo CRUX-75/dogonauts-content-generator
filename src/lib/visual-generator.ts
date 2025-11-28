@@ -13,24 +13,26 @@ function ensureValidImageUrl(imageUrl: string | null, productId: string): string
     throw new Error(`Producto ${productId} no tiene image_url definida`);
   }
 
+  const trimmed = imageUrl.trim();
+
   // Comprobación rápida: debe empezar por http
-  if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
+  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
     throw new Error(
-      `Producto ${productId} tiene image_url inválida (no es URL HTTP): ${imageUrl}`
+      `Producto ${productId} tiene image_url inválida (no es URL HTTP): ${trimmed}`
     );
   }
 
   // Validación formal con URL()
   try {
     // eslint-disable-next-line no-new
-    new URL(imageUrl);
+    new URL(trimmed);
   } catch {
     throw new Error(
-      `Producto ${productId} tiene image_url con formato incorrecto: ${imageUrl}`
+      `Producto ${productId} tiene image_url con formato incorrecto: ${trimmed}`
     );
   }
 
-  return imageUrl;
+  return trimmed;
 }
 
 // Generador legacy básico (1 imagen cuadrada centrada)

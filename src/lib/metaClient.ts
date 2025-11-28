@@ -387,22 +387,55 @@ class MetaGraphClient {
   }
 
   // ────────────────────────────────────────────────────────────────
-  // Insights
-  // ────────────────────────────────────────────────────────────────
+// Insights (Instagram)
+// ────────────────────────────────────────────────────────────────
 
   /**
-   * Obtener métricas de un post de Instagram
+   * Obtener métricas de un post de Instagram (v24+ compatible)
+   *
+   * Notas:
+   * - "impressions" ya no está soportado en /insights para este tipo de media.
+   * - Usamos:
+   *    - reach, saved  → desde /insights
+   *    - likes, comments → desde /{mediaId}?fields=like_count,comments_count
+   * - Aproximamos impressions = reach para no romper el cálculo de perf_score.
    */
   async getInstagramMediaInsights(mediaId: string): Promise<any> {
     try {
-      const { data } = await this.client.get(`/${mediaId}/insights`, {
-        params: {
-          metric:
-            'engagement,impressions,reach,saved,likes,comments,shares',
-        },
-      });
+      // 1) Insights válidos para v22+ (sin impressions)
+      const [insightsRes, mediaRes] = await Promise.all([
+        this.client.get(`/${mediaId}/insights`, {
+          params: {
+            metric: 'reach,saved',
+          },
+        }),
+        this.client.get(`/${mediaId}`, {
+          params: {
+            fields: 'like_count,comments_count',
+          },
+        }),
+      ]);
 
-      return this.parseInsights(data.data);
+      const insightsArray = insightsRes.data?.data || [];
+      const insights = this.parseInsights(insightsArray);
+      const media = mediaRes.data || {};
+
+      const reach = insights.reach || 0;
+      const saved = insights.saved || 0;
+      const likes = media.like_count || 0;
+      const comments = media.comments_count || 0;
+
+      // No hay "impressions", usamos reach como proxy para tu scoring
+      const impressions = reach;
+
+      return {
+        impressions,   // proxy para tu calculatePerformanceScore
+        reach,
+        saves: saved,
+        likes,
+        comments,
+        shares: 0,     // IG no expone shares estándar de forma directa
+      };
     } catch (error) {
       logError('[META] Failed to get Instagram insights', {
         mediaId,
@@ -411,6 +444,8 @@ class MetaGraphClient {
       throw error;
     }
   }
+
+
 
   /**
    * Obtener métricas de un post de Facebook

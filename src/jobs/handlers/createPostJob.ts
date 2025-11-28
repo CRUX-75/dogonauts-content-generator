@@ -3,84 +3,61 @@
 import { featureFlags } from '../../lib/feature-flags';
 import { supabaseAdmin } from '../../lib/supabase';
 import { getTemplateForProduct } from '../../lib/visual-templates';
-import { generateBasicImage } from '../../lib/visual-generator';
+import { generateBasicImage, ProductLike } from '../../lib/visual-generator';
 import { uploadToSupabase } from '../../lib/upload';
 import { generatePostContent } from '../../lib/prompt-generator';
-import { selectProduct, ProductRow } from '../../lib/product-selector';
-
-// ✨ STUB seguro para advanced visuals (Sprint 3.5C lo implementamos real)
-async function generateAdvancedVisualStub(product: ProductRow, template: any) {
-  console.log(`🧪 Stub visuals para producto ${product.id} → modo seguro`);
-
-  // Usamos el generador legacy pero marcándolo como "advanced" a nivel metadata
-  const buffer = await generateBasicImage(product);
-  const imageUrl = await uploadToSupabase(
-    buffer,
-    `stub-advanced-${product.id}-${Date.now()}.png`
-  );
-
-  return {
-    mainImage: imageUrl,
-    carouselImages: null as string[] | null,
-    templateVersion: 'v2_stub'
-  };
-}
+import { selectProduct } from '../../lib/product-selector';
+import { generateAdvancedVisuals } from '../../lib/visual-generator-v2';
 
 export async function createPostJob(job: any) {
   try {
-    console.log(`\n--- CREATE POST JOB START ---`);
-    console.log(`Job ID: ${job?.id}`);
+    console.log('\n--- CREATE POST JOB START ---');
+    console.log(`Job ID: ${job?.id ?? 'unknown'}`);
 
-    // 1. Selección de producto
+    // 1) Seleccionar producto válido
     const product = await selectProduct();
     console.log(
-      `📦 Producto seleccionado: ${product.product_name} (${product.id})`
+      `🎯 Producto elegido entre válidos: ${product.product_name} (${product.id})`
     );
 
-    // 2. Decidir si usamos el nuevo sistema visual
+    // 2) Leer feature flag
     const useAdvancedVisual = await featureFlags.shouldUseFeature(
       'advanced_visuals_enabled',
       product.id.toString()
     );
-
     console.log(`🎛️ advanced_visual flag = ${useAdvancedVisual}`);
 
-    // 3. Obtener template (aunque de momento solo lo usamos en el stub)
+    // 3) Obtener template (aunque sea single)
     const template = getTemplateForProduct(product);
     console.log(
-      `📐 Template detectado: ${product.product_category || 'accessory'} → ${
-        template.type
-      }`
+      `📐 Template detectado: ${product.product_category ?? 'n/a'} → ${template.type}`
     );
 
-    let visualAssets: any;
-    let visualFormat: string = 'single_legacy';
-    let templateVersion: string = 'v1_basic';
+    let visualAssets: { mainImage: string; carouselImages: string[] | null };
+    let visualFormat = 'single_legacy';
+    let templateVersion = 'v1_basic';
 
-    // 4. Flujo avanzado (por ahora STUB seguro)
     if (useAdvancedVisual) {
-      console.log(`🚀 Usando pipeline avanzado (STUB)`);
+      console.log('🚀 Usando pipeline avanzado (v2)');
+      const adv = await generateAdvancedVisuals(product as ProductLike, template);
 
-      visualAssets = await generateAdvancedVisualStub(product, template);
-      visualFormat = template.type; // 'single' o 'carousel'
-      templateVersion = visualAssets.templateVersion;
+      visualAssets = {
+        mainImage: adv.mainImage,
+        carouselImages: adv.carouselImages ?? null,
+      };
+      visualFormat = template.type;
+      templateVersion = adv.templateVersion;
     } else {
-      // 5. Flujo legacy (actual)
-      console.log(`📦 Usando pipeline legacy`);
-
-      const buffer = await generateBasicImage(product);
-      const imageUrl = await uploadToSupabase(
-        buffer,
-        `legacy-${product.id}-${Date.now()}.png`
-      );
-
-      visualAssets = { mainImage: imageUrl, carouselImages: null };
+      console.log('📦 Usando pipeline legacy');
+      const buffer = await generateBasicImage(product as ProductLike);
+      const url = await uploadToSupabase(buffer, `legacy-${product.id}.png`);
+      visualAssets = { mainImage: url, carouselImages: null };
     }
 
-    // 6. Generar copy (tu lógica de prompt actual)
+    // 4) Generar copy
     const postContent = await generatePostContent(product);
 
-    // 7. Guardar DRAFT en Supabase
+    // 5) Insertar DRAFT en generated_posts
     const { data: post, error } = await supabaseAdmin
       .from('generated_posts')
       .insert({
@@ -89,12 +66,12 @@ export async function createPostJob(job: any) {
         caption_fb: postContent.caption_fb,
         composed_image_url: visualAssets.mainImage,
         carousel_images: visualAssets.carouselImages,
-        visual_format: visualFormat,
-        template_version: templateVersion,
+        visual_format: visualFormat,          // 'single_legacy' o 'single' / 'carousel'
+        template_version: templateVersion,    // tracking versión del engine
         use_advanced_visual: useAdvancedVisual,
         status: 'DRAFT',
         style: postContent.style,
-        channel_target: 'BOTH'
+        channel_target: 'BOTH',
       })
       .select()
       .single();
@@ -104,32 +81,28 @@ export async function createPostJob(job: any) {
     }
 
     console.log(`✅ DRAFT creado correctamente: ${post.id}`);
-    console.log(`--- CREATE POST JOB END ---\n`);
+    console.log('--- CREATE POST JOB END ---\n');
 
-    // 8. Actualizar estado del job
-    if (job?.id) {
-      await supabaseAdmin
-        .from('job_queue')
-        .update({
-          status: 'COMPLETED',
-          finished_at: new Date().toISOString()
-        })
-        .eq('id', job.id);
-    }
+    // 6) Actualizar estado del job
+    await supabaseAdmin
+      .from('job_queue')
+      .update({
+        status: 'COMPLETED',
+        finished_at: new Date().toISOString(),
+      })
+      .eq('id', job.id);
   } catch (err: any) {
     console.error('❌ Error en createPostJob:', err);
 
-    if (job?.id) {
-      await supabaseAdmin
-        .from('job_queue')
-        .update({
-          status: 'FAILED',
-          error: err?.message || String(err),
-          attempts: (job.attempts ?? 0) + 1,
-          finished_at: new Date().toISOString()
-        })
-        .eq('id', job.id);
-    }
+    await supabaseAdmin
+      .from('job_queue')
+      .update({
+        status: 'FAILED',
+        error: err?.message || String(err),
+        attempts: (job?.attempts ?? 0) + 1,
+        finished_at: new Date().toISOString(),
+      })
+      .eq('id', job?.id);
 
     throw err;
   }
