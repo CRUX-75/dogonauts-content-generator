@@ -21,59 +21,66 @@ interface FacebookPostParams {
 }
 
 class MetaGraphClient {
-  private client: AxiosInstance;              // IG / general (user token)
-  private fbClient: AxiosInstance;           // FB Page (page token)
-  private accessToken: string;
+  // IG
+  private igClient: AxiosInstance;
+  private igAccessToken: string;
   private instagramAccountId: string;
+
+  // FB Page
+  private fbClient: AxiosInstance;
+  private fbPageAccessToken: string;
   private facebookPageId: string;
-  private facebookPageAccessToken: string;
 
   constructor() {
-    // Token base (user) para IG y llamadas generales
-    this.accessToken = config.meta.accessToken;
+    // Tokens de entorno
+    this.igAccessToken = config.meta.accessToken; // META_ACCESS_TOKEN
     this.instagramAccountId = config.meta.instagramBusinessAccountId;
 
-    // Page ID + Page Token específicos para Facebook
-    this.facebookPageId = config.meta.facebookPageId;
-    this.facebookPageAccessToken =
-      config.meta.facebookPageAccessToken || this.accessToken;
+    const pageId = config.meta.facebookPageId;
+    const pageToken =
+      config.meta.facebookPageAccessToken || this.igAccessToken; // fallback por si acaso
 
-    if (!this.accessToken) {
+    this.facebookPageId = pageId;
+    this.fbPageAccessToken = pageToken;
+
+    if (!this.igAccessToken) {
       throw new Error('[META] META_ACCESS_TOKEN is not configured');
     }
     if (!this.instagramAccountId) {
       throw new Error('[META] INSTAGRAM_BUSINESS_ACCOUNT_ID is not configured');
     }
     if (!this.facebookPageId) {
-      log('[META] Warning: FACEBOOK_PAGE_ID is not configured, FB posts will fail');
-    }
-    if (!this.facebookPageAccessToken) {
       log(
-        '[META] Warning: FACEBOOK_PAGE_ACCESS_TOKEN is not configured, using META_ACCESS_TOKEN for FB (may fail)'
+        '[META] Warning: FACEBOOK_PAGE_ID is not configured, FB posts will fail'
+      );
+    }
+    if (!this.fbPageAccessToken) {
+      log(
+        '[META] Warning: FACEBOOK_PAGE_ACCESS_TOKEN is not configured, FB posts will use IG token'
       );
     }
 
-    // Cliente para IG (user token)
-    this.client = axios.create({
+    // Cliente para IG (usa token IG)
+    this.igClient = axios.create({
       baseURL: 'https://graph.facebook.com/v18.0',
       params: {
-        access_token: this.accessToken,
+        access_token: this.igAccessToken,
       },
     });
 
-    // Cliente para FB página (page token)
+    // Cliente para Facebook Page (usa PAGE ACCESS TOKEN)
     this.fbClient = axios.create({
       baseURL: 'https://graph.facebook.com/v18.0',
       params: {
-        access_token: this.facebookPageAccessToken,
+        access_token: this.fbPageAccessToken,
       },
     });
 
     log('[META] MetaGraphClient initialized', {
       igAccountId: this.instagramAccountId,
       fbPageId: this.facebookPageId,
-      igTokenPrefix: this.accessToken.slice(0, 12),
-      fbPageTokenPrefix: this.facebookPageAccessToken.slice(0, 12),
+      igTokenPrefix: this.igAccessToken.slice(0, 10),
+      fbPageTokenPrefix: this.fbPageAccessToken.slice(0, 10),
     });
   }
 
@@ -88,13 +95,14 @@ class MetaGraphClient {
   /**
    * Espera a que un media container esté listo (status_code = FINISHED).
    * Lanza error si entra en ERROR o si no está listo tras N reintentos.
+   * (Usa IG client, porque es para Instagram.)
    */
   private async waitForMediaReady(creationId: string): Promise<void> {
     const maxAttempts = 10;
     const delayMs = 2000;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const { data } = await this.client.get(`/${creationId}`, {
+      const { data } = await this.igClient.get(`/${creationId}`, {
         params: {
           fields: 'status_code',
         },
@@ -137,13 +145,6 @@ class MetaGraphClient {
   // Instagram – Carousel
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Publicar un carousel en Instagram:
-   * 1) Crear containers de cada imagen (is_carousel_item)
-   * 2) Crear container principal CAROUSEL
-   * 3) Esperar a que el container CAROUSEL esté FINISHED
-   * 4) /media_publish
-   */
   async publishInstagramCarousel(
     images: InstagramCarouselImage[],
     caption: string
@@ -153,11 +154,10 @@ class MetaGraphClient {
         imageCount: images.length,
       });
 
-      // Paso 1: Crear containers para cada imagen
       const containerIds: string[] = [];
 
       for (const image of images) {
-        const { data } = await this.client.post(
+        const { data } = await this.igClient.post(
           `/${this.instagramAccountId}/media`,
           {
             image_url: image.image_url,
@@ -177,8 +177,7 @@ class MetaGraphClient {
         });
       }
 
-      // Paso 2: Crear el carousel container principal
-      const { data: carouselData } = await this.client.post(
+      const { data: carouselData } = await this.igClient.post(
         `/${this.instagramAccountId}/media`,
         {
           media_type: 'CAROUSEL',
@@ -198,11 +197,9 @@ class MetaGraphClient {
         containerId: carouselCreationId,
       });
 
-      // Paso 3: Esperar a que el carousel esté listo
       await this.waitForMediaReady(carouselCreationId);
 
-      // Paso 4: Publicar el carousel
-      const { data: publishData } = await this.client.post(
+      const { data: publishData } = await this.igClient.post(
         `/${this.instagramAccountId}/media_publish`,
         {
           creation_id: carouselCreationId,
@@ -233,12 +230,6 @@ class MetaGraphClient {
   // Instagram – Single image
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Publicar una imagen simple en Instagram:
-   * 1) Crear media container
-   * 2) Esperar a que status_code = FINISHED
-   * 3) /media_publish
-   */
   async publishInstagramSingle(
     params: InstagramSingleImageParams
   ): Promise<string> {
@@ -247,8 +238,7 @@ class MetaGraphClient {
         image_url: params.image_url,
       });
 
-      // Paso 1: Crear media container
-      const { data: containerData } = await this.client.post(
+      const { data: containerData } = await this.igClient.post(
         `/${this.instagramAccountId}/media`,
         {
           image_url: params.image_url,
@@ -265,11 +255,9 @@ class MetaGraphClient {
       const creationId = containerData.id;
       log('[META] Created IG media container', { containerId: creationId });
 
-      // Paso 2: Esperar a que el media esté listo
       await this.waitForMediaReady(creationId);
 
-      // Paso 3: Publicar
-      const { data: publishData } = await this.client.post(
+      const { data: publishData } = await this.igClient.post(
         `/${this.instagramAccountId}/media_publish`,
         {
           creation_id: creationId,
@@ -297,26 +285,20 @@ class MetaGraphClient {
   }
 
   // ────────────────────────────────────────────────────────────────
-  // Facebook – Posts
+  // Facebook – Posts & Photos (usa fbClient con PAGE TOKEN)
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Publicar en Facebook (page post)
-   */
   async publishFacebookPost(params: FacebookPostParams): Promise<string> {
     try {
       log('[META] Publishing Facebook post', {
         pageId: this.facebookPageId,
       });
 
-      const { data } = await this.fbClient.post(
-        `/${this.facebookPageId}/feed`,
-        {
-          message: params.message,
-          link: params.link,
-          published: params.published !== false,
-        }
-      );
+      const { data } = await this.fbClient.post(`/${this.facebookPageId}/feed`, {
+        message: params.message,
+        link: params.link,
+        published: params.published !== false,
+      });
 
       if (!data?.id) {
         throw new Error('[META] Failed to publish Facebook post (no id)');
@@ -333,9 +315,6 @@ class MetaGraphClient {
     }
   }
 
-  /**
-   * Publicar una imagen en Facebook (single image con caption)
-   */
   async publishFacebookImage({
     image_url,
     caption,
@@ -373,15 +352,6 @@ class MetaGraphClient {
     }
   }
 
-  // ────────────────────────────────────────────────────────────────
-  // Facebook – Carousel (placeholder/simple)
-  // ────────────────────────────────────────────────────────────────
-
-  /**
-   * Publicar carousel en Facebook (múltiples imágenes).
-   * Versión simplificada: por ahora publica solo la primera imagen
-   * como post de foto normal con el mensaje.
-   */
   async publishFacebookCarousel(
     images: string[],
     message: string
@@ -392,26 +362,22 @@ class MetaGraphClient {
         imageCount: images.length,
       });
 
-      const firstImage = images[0];
+      // En producción: subir imágenes primero y usar media_fbid reales.
+      const attachedMedia = images.map((url) => ({
+        media_fbid: url,
+      }));
 
-      const { data } = await this.fbClient.post(
-        `/${this.facebookPageId}/photos`,
-        {
-          url: firstImage,
-          caption: message,
-          published: true,
-        }
-      );
-
-      if (!data?.post_id) {
-        throw new Error('[META] Failed to publish Facebook carousel (no post_id)');
-      }
-
-      log('[META] ✅ Facebook "carousel" (single photo) published', {
-        postId: data.post_id,
+      const { data } = await this.fbClient.post(`/${this.facebookPageId}/feed`, {
+        message,
+        attached_media: JSON.stringify(attachedMedia),
       });
 
-      return data.post_id;
+      if (!data?.id) {
+        throw new Error('[META] Failed to publish Facebook carousel (no id)');
+      }
+
+      log('[META] ✅ Facebook carousel published', { postId: data.id });
+      return data.id;
     } catch (error) {
       logError(
         '[META] Failed to publish Facebook carousel',
@@ -422,29 +388,18 @@ class MetaGraphClient {
   }
 
   // ────────────────────────────────────────────────────────────────
-  // Insights (Instagram)
+  // Insights
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Obtener métricas de un post de Instagram (v24+ compatible)
-   *
-   * Notas:
-   * - "impressions" ya no está soportado en /insights para este tipo de media.
-   * - Usamos:
-   *    - reach, saved  → desde /insights
-   *    - likes, comments → desde /{mediaId}?fields=like_count,comments_count
-   * - Aproximamos impressions = reach para no romper el cálculo de perf_score.
-   */
   async getInstagramMediaInsights(mediaId: string): Promise<any> {
     try {
-      // 1) Insights válidos para v22+ (sin impressions)
       const [insightsRes, mediaRes] = await Promise.all([
-        this.client.get(`/${mediaId}/insights`, {
+        this.igClient.get(`/${mediaId}/insights`, {
           params: {
             metric: 'reach,saved',
           },
         }),
-        this.client.get(`/${mediaId}`, {
+        this.igClient.get(`/${mediaId}`, {
           params: {
             fields: 'like_count,comments_count',
           },
@@ -460,16 +415,15 @@ class MetaGraphClient {
       const likes = media.like_count || 0;
       const comments = media.comments_count || 0;
 
-      // No hay "impressions", usamos reach como proxy para tu scoring
       const impressions = reach;
 
       return {
-        impressions, // proxy para tu calculatePerformanceScore
+        impressions,
         reach,
         saves: saved,
         likes,
         comments,
-        shares: 0, // IG no expone shares estándar de forma directa
+        shares: 0,
       };
     } catch (error) {
       logError('[META] Failed to get Instagram insights', {
@@ -480,9 +434,6 @@ class MetaGraphClient {
     }
   }
 
-  /**
-   * Obtener métricas de un post de Facebook
-   */
   async getFacebookPostInsights(postId: string): Promise<any> {
     try {
       const { data } = await this.fbClient.get(`/${postId}`, {
@@ -507,9 +458,6 @@ class MetaGraphClient {
     }
   }
 
-  /**
-   * Helper para parsear insights de Instagram
-   */
   private parseInsights(insightsData: any[]): Record<string, number> {
     const metrics: Record<string, number> = {};
 
