@@ -21,6 +21,7 @@ export async function publishPostJob(payload: PublishJobPayload) {
   try {
     let post: GeneratedPost | null = null;
 
+    // 1) Si viene post_id en el payload → publicamos ese
     if (payload.post_id) {
       const { data, error } = await supabaseAdmin
         .from('generated_posts')
@@ -29,11 +30,16 @@ export async function publishPostJob(payload: PublishJobPayload) {
         .single();
 
       if (error || !data) {
+        logError('[PUBLISH_POST] Post not found by post_id', {
+          post_id: payload.post_id,
+          error,
+        });
         throw new Error(`Post ${payload.post_id} not found`);
       }
 
-      post = data;
+      post = data as GeneratedPost;
     } else {
+      // 2) Si no viene post_id → cogemos el primer DRAFT más antiguo
       const { data, error } = await supabaseAdmin
         .from('generated_posts')
         .select('*')
@@ -47,13 +53,14 @@ export async function publishPostJob(payload: PublishJobPayload) {
         return;
       }
 
-      post = data;
+      post = data as GeneratedPost;
     }
 
     if (!post) {
       throw new Error('Post not found');
     }
 
+    // 3) Solo publicar DRAFT a menos que force = true
     if (post.status !== 'DRAFT' && !payload.force) {
       log('[PUBLISH_POST] Post is not in DRAFT status, skipping', {
         status: post.status,
@@ -68,15 +75,19 @@ export async function publishPostJob(payload: PublishJobPayload) {
       channel_target: post.channel_target,
     });
 
+    // 4) Construir caption completo
     const fullCaption = buildCaption(post);
+
+    // 5) Publicar en canales
     const results = await publishToChannels(post, fullCaption);
 
     if (!results.igMediaId && !results.fbPostId) {
       throw new Error(
-        `[PUBLISH_POST] No channel was published successfully for post ${post.id}`
+        `[PUBLISH_POST] No channel was published successfully for post ${post.id}`,
       );
     }
 
+    // 6) Actualizar fila en generated_posts
     const updateData: Partial<GeneratedPost> = {
       status: 'PUBLISHED',
       published_at: new Date().toISOString(),
@@ -92,10 +103,11 @@ export async function publishPostJob(payload: PublishJobPayload) {
 
     if (updateError) {
       throw new Error(
-        `[PUBLISH_POST] Failed to update generated_posts: ${updateError.message}`
+        `[PUBLISH_POST] Failed to update generated_posts: ${updateError.message}`,
       );
     }
 
+    // 7) Crear entrada en post_feedback (si no existe)
     const { error: feedbackError } = await supabaseAdmin
       .from('post_feedback')
       .insert({
@@ -106,9 +118,10 @@ export async function publishPostJob(payload: PublishJobPayload) {
       });
 
     if (feedbackError && (feedbackError as any).code !== '23505') {
+      // 23505 = unique_violation → ya existe feedback, no pasa nada
       logError(
         '[PUBLISH_POST] Failed to create feedback entry',
-        feedbackError
+        feedbackError,
       );
     }
 
@@ -133,12 +146,14 @@ function buildCaption(post: GeneratedPost): string {
     parts.push(post.hashtag_block);
   }
 
-  return parts.filter((p) => p !== undefined && p !== null).join('\n');
+  return parts
+    .filter((p) => p !== undefined && p !== null)
+    .join('\n');
 }
 
 async function publishToChannels(
   post: GeneratedPost,
-  caption: string
+  caption: string,
 ): Promise<PublishResults> {
   const results: PublishResults = {};
 
@@ -147,28 +162,33 @@ async function publishToChannels(
   const publishToFB =
     post.channel_target === 'IG_FB' || post.channel_target === 'FB_ONLY';
 
+  // 1) Instagram
   if (publishToIG) {
     try {
       results.igMediaId = await publishInstagramSingle(post, caption);
 
       if (!results.igMediaId) {
         throw new Error(
-          `[PUBLISH_POST] metaClient.publishInstagramSingle returned empty igMediaId for post ${post.id}`
+          `[PUBLISH_POST] metaClient.publishInstagramSingle returned empty igMediaId for post ${post.id}`,
         );
       }
     } catch (error: any) {
       logError(
         '[PUBLISH_POST] Instagram publication failed',
-        error?.response?.data || error
+        error?.response?.data || error,
       );
       throw error;
     }
   }
 
+  // 2) Facebook
   if (publishToFB) {
     try {
-      const composedImageUrl = (post as any).composed_image_url?.trim() ?? null;
-      const baseImageUrl = (post as any).image_url?.trim() ?? null;
+      const composedImageUrl =
+        ((post as any).composed_image_url as string | null)?.trim() ?? null;
+      const baseImageUrl =
+        ((post as any).image_url as string | null)?.trim() ?? null;
+
       const postImageUrl = composedImageUrl || baseImageUrl;
 
       if (!postImageUrl) {
@@ -176,10 +196,12 @@ async function publishToChannels(
           postId: post.id,
         });
       } else {
-        results.fbPostId = await metaClient.publishFacebookImage({
+        const fbPostId = await metaClient.publishFacebookImage({
           image_url: postImageUrl,
           caption,
         });
+
+        results.fbPostId = fbPostId;
 
         if (!results.fbPostId) {
           logError('[PUBLISH_POST] Facebook returned empty fbPostId', {
@@ -190,7 +212,7 @@ async function publishToChannels(
     } catch (error: any) {
       logError(
         '[PUBLISH_POST] Facebook publication failed',
-        error?.response?.data || error
+        error?.response?.data || error,
       );
     }
   }
@@ -204,22 +226,24 @@ function determineChannel(results: PublishResults): 'IG' | 'FB' | 'BOTH' {
   if (results.fbPostId) return 'FB';
 
   throw new Error(
-    '[PUBLISH_POST] determineChannel called with no igMediaId or fbPostId'
+    '[PUBLISH_POST] determineChannel called with no igMediaId or fbPostId',
   );
 }
 
 async function publishInstagramSingle(
   post: GeneratedPost,
-  caption: string
+  caption: string,
 ): Promise<string> {
-  const composedImageUrl = ((post as any).composed_image_url as string | null) ?? null;
-  const baseImageUrl = ((post as any).image_url as string | null) ?? null;
+  const composedImageUrl =
+    ((post as any).composed_image_url as string | null) ?? null;
+  const baseImageUrl =
+    ((post as any).image_url as string | null) ?? null;
 
   const postImageUrl = composedImageUrl || baseImageUrl;
 
   if (!postImageUrl || !postImageUrl.trim().length) {
     throw new Error(
-      `[PUBLISH_POST] Post ${post.id} has no composed_image_url or image_url set.`
+      `[PUBLISH_POST] Post ${post.id} has no composed_image_url or image_url set.`,
     );
   }
 
@@ -236,7 +260,7 @@ async function publishInstagramSingle(
 
   if (!igMediaId) {
     throw new Error(
-      `[PUBLISH_POST] metaClient.publishInstagramSingle did not return igMediaId for post ${post.id}`
+      `[PUBLISH_POST] metaClient.publishInstagramSingle did not return igMediaId for post ${post.id}`,
     );
   }
 
